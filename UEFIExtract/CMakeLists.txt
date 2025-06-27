@@ -10,6 +10,8 @@ SET(PROJECT_SOURCES
  uefiextract_main.cpp
  ffsdumper.cpp
  uefidump.cpp
+ ffsfocusedextractor.cpp
+ ffssbomparser.cpp
  ../common/guiddatabase.cpp
  ../common/types.cpp
  ../common/filesystem.cpp

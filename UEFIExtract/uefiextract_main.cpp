@@ -12,6 +12,7 @@ WITHOUT WARRANTIES OR REPRESENTATIONS OF ANY KIND, EITHER EXPRESS OR IMPLIED.
 #include <fstream>
 #include <cstring>
 #include <cstdlib>
+#include <set>
 
 #include "../version.h"
 #include "../common/basetypes.h"
@@ -22,6 +23,8 @@ WITHOUT WARRANTIES OR REPRESENTATIONS OF ANY KIND, EITHER EXPRESS OR IMPLIED.
 #include "../common/guiddatabase.h"
 #include "ffsdumper.h"
 #include "uefidump.h"
+#include "ffsfocusedextractor.h"
+#include "ffssbomparser.h"
 
 enum ReadType {
     READ_INPUT,
@@ -40,10 +43,54 @@ void print_usage()
         << "       UEFIExtract imagefile dump   - only generate dump, no report or GUID database needed." << std::endl
         << "       UEFIExtract imagefile report - only generate report, no dump or GUID database needed." << std::endl
         << "       UEFIExtract imagefile guids  - only generate GUID database, no dump or report needed." << std::endl
+        << "       UEFIExtract imagefile [all|dump|unpack] [--outdir DIR|-d DIR] - specify output directory for extraction." << std::endl
         << "       UEFIExtract imagefile GUID_1 ... [ -o FILE_1 ... ] [ -m MODE_1 ... ] [ -t TYPE_1 ... ] -" << std::endl
         << "         Dump only FFS file(s) with specific GUID(s), without report or GUID database." << std::endl
         << "         Type is section type or FF to ignore. Mode is one of: all, body, unc_data, header, info, file." << std::endl
-        << "         Return value is a bit mask where 0 at position N means that file with GUID_N was found and unpacked, 1 otherwise." << std::endl;
+        << "         Return value is a bit mask where 0 at position N means that file with GUID_N was found and unpacked, 1 otherwise." << std::endl
+        << "       UEFIExtract --ffs-fd-only imagefile [--outdir DIR|-d DIR]  - extract only top-level FD and embedded FFS regions into specified folder." << std::endl
+        << "         This mode is memory-efficient, concurrent, and skips compressed or corrupt regions." << std::endl
+        << "       UEFIExtract --sbom imagefile  - parse image and generate SBOM text file (Software Bill of Materials) for all FFS modules." << std::endl
+        << "       --outdir DIR, -d DIR   Specify output directory for extraction (default: <imagefile>.dump)" << std::endl;
+}
+
+void extractFlatFfsFdOnly(TreeModel* model, const UModelIndex& index, const UString& outDir, std::set<UString>& usedNames) {
+    if (!index.isValid()) return;
+    UINT8 type = model->type(index);
+    UString filename;
+    if (type == Types::File) {
+        // FFS file
+        if (!model->hasEmptyHeader(index) && model->header(index).size() >= sizeof(EFI_FFS_FILE_HEADER)) {
+            const EFI_FFS_FILE_HEADER* header = (const EFI_FFS_FILE_HEADER*)model->header(index).constData();
+            UString guid = guidToUString(header->Name);
+            filename = usprintf("%s_%08X.ffs", guid.toLocal8Bit(), model->offset(index));
+        } else {
+            filename = usprintf("UNKNOWN_%08X.ffs", model->offset(index));
+        }
+    } else if (type == Types::Region) {
+        // FD region
+        filename = usprintf("%08X.fd", model->offset(index));
+    }
+    if (!filename.isEmpty()) {
+        // Ensure unique filename
+        UString base = filename;
+        int n = 1;
+        while (usedNames.count(filename)) {
+            filename = base + usprintf("_%d", n++);
+        }
+        usedNames.insert(filename);
+        // Write body
+        const UByteArray& body = model->body(index);
+        if (!body.isEmpty()) {
+            std::ofstream file((outDir + "/" + filename).toLocal8Bit(), std::ios::binary);
+            file.write(body.constData(), body.size());
+            file.close();
+        }
+    }
+    // Recurse into children
+    for (int i = 0; i < model->rowCount(index); ++i) {
+        extractFlatFfsFdOnly(model, index.child(i, 0), outDir, usedNames);
+    }
 }
 
 int main(int argc, char *argv[])
@@ -54,7 +101,7 @@ int main(int argc, char *argv[])
         print_usage();
         return 1;
     }
-    
+
     // Help and version
     if (argc == 2) {
         UString arg = UString(argv[1]);
@@ -67,20 +114,65 @@ int main(int argc, char *argv[])
             return 0;
         }
     }
-    
+
+    // Check for new --ffs-fd-only option
+    if (argc >= 3 && !std::strcmp(argv[1], "--ffs-fd-only")) {
+        UString path = getAbsPath(argv[2]);
+        UString outDir;
+        for (int i = 3; i < argc; i++) {
+            if (!std::strcmp(argv[i], "--outdir") || !std::strcmp(argv[i], "-d")) {
+                if (i + 1 < argc) {
+                    outDir = UString(argv[i + 1]);
+                    break;
+                }
+            }
+        }
+        UByteArray buffer;
+        if (false == readFileIntoBuffer(path, buffer))
+            return U_FILE_OPEN;
+        TreeModel model;
+        FfsParser ffsParser(&model);
+        USTATUS result = ffsParser.parse(buffer);
+        if (result)
+            return (int)result;
+        UString outPath = outDir.isEmpty() ? path + UString(".dump_ffs_fd_only") : outDir;
+        makeDirectory(outPath);
+        std::set<UString> usedNames;
+        extractFlatFfsFdOnly(&model, model.index(0, 0), outPath, usedNames);
+        return 0;
+    }
+
+    // Check for new --sbom option
+    if (argc >= 3 && !std::strcmp(argv[1], "--sbom")) {
+        UString path = getAbsPath(argv[2]);
+        UByteArray buffer;
+        if (false == readFileIntoBuffer(path, buffer))
+            return U_FILE_OPEN;
+        TreeModel model;
+        FfsParser ffsParser(&model);
+        USTATUS result = ffsParser.parse(buffer);
+        if (result)
+            return (int)result;
+        FfsSbomParser sbomParser(&model);
+        result = sbomParser.parseSbom(model.index(0, 0), path + UString(".sbom"));
+        if (result)
+            return (int)result;
+        return sbomParser.exportToText(path + UString(".sbom.txt"));
+    }
+
     // Check that input file exists
     USTATUS result;
     UByteArray buffer;
     UString path = getAbsPath(argv[1]);
     if (false == readFileIntoBuffer(path, buffer))
         return U_FILE_OPEN;
-    
+
     // Hack to support legacy UEFIDump mode
     if (argc == 3 && !std::strcmp(argv[2], "unpack")) {
         UEFIDumper uefidumper;
         return (uefidumper.dump(buffer, UString(argv[1])) != U_SUCCESS);
     }
-    
+
     // Create model and ffsParser
     TreeModel model;
     FfsParser ffsParser(&model);
@@ -88,15 +180,19 @@ int main(int argc, char *argv[])
     result = ffsParser.parse(buffer);
     if (result)
         return (int)result;
-    
+
     ffsParser.outputInfo();
-    
+
     // Create ffsDumper
     FfsDumper ffsDumper(&model);
-    
+
     // Dump only leaf elements, no report or GUID database
     if (argc == 3 && !std::strcmp(argv[2], "dump")) {
-        return (ffsDumper.dump(model.index(0, 0), path + UString(".dump")) != U_SUCCESS);
+        UString dumpPath = path + UString(".dump");
+        makeDirectory(dumpPath);
+        std::set<UString> usedNames;
+        extractFlatFfsFdOnly(&model, model.index(0, 0), dumpPath, usedNames);
+        return 0;
     }
     // Dump named GUIDs found in the image, no dump or report
     else if (argc == 3 && !std::strcmp(argv[2], "guids")) {
@@ -129,19 +225,27 @@ int main(int argc, char *argv[])
             for (size_t i = 0; i < report.size(); i++)
                 file << report[i].toLocal8Bit() << '\n';
         }
-        
+
         // Create GUID database
         GuidDatabase db = guidDatabaseFromTreeRecursive(&model, model.index(0, 0));
         if (!db.empty()) {
             guidDatabaseExportToFile(path + UString(".guids.csv"), db);
         }
-        
+
         // Dump all non-leaf elements, with report and GUID database, default
         if (argc == 2) {
-            return (ffsDumper.dump(model.index(0, 0), path + UString(".dump")) != U_SUCCESS);
+            UString dumpPath = path + UString(".dump");
+            makeDirectory(dumpPath);
+            std::set<UString> usedNames;
+            extractFlatFfsFdOnly(&model, model.index(0, 0), dumpPath, usedNames);
+            return 0;
         }
         else if (argc == 3 && !std::strcmp(argv[2], "all")) { // Dump every element with report and GUID database
-            return (ffsDumper.dump(model.index(0, 0), path + UString(".dump"), FfsDumper::DUMP_ALL) != U_SUCCESS);
+            UString dumpPath = path + UString(".dump");
+            makeDirectory(dumpPath);
+            std::set<UString> usedNames;
+            extractFlatFfsFdOnly(&model, model.index(0, 0), dumpPath, usedNames);
+            return 0;
         }
     }
     // Dump specific files, without report or GUID database
@@ -165,7 +269,7 @@ int main(int argc, char *argv[])
                 readType = READ_SECTION;
                 continue;
             }
-            
+
             if (readType == READ_INPUT) {
                 inputs.push_back(arg);
             } else if (readType == READ_OUTPUT) {
@@ -197,7 +301,7 @@ int main(int argc, char *argv[])
             (!modes.empty() && inputs.size() != modes.size()) ||
             (!sectionTypes.empty() && inputs.size() != sectionTypes.size()))
             return U_INVALID_PARAMETER;
-        
+
         USTATUS lastError = U_SUCCESS;
         for (size_t i = 0; i < inputs.size(); i++) {
             UString outPath = outputs.empty() ? path + UString(".dump") : outputs[i];
@@ -209,10 +313,10 @@ int main(int argc, char *argv[])
                 lastError = result;
             }
         }
-        
+
         return (int)lastError;
     }
-    
+
     // If parameters are different, show version and usage information
     print_usage();
     return 1;
