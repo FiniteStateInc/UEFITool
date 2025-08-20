@@ -27,25 +27,35 @@ WITHOUT WARRANTIES OR REPRESENTATIONS OF ANY KIND, EITHER EXPRESS OR IMPLIED.
 #include "../common/utility.h"
 #include "../common/digest/sha2.h"
 
-struct SbomEntry {
-    UString componentName;
-    UString guid;
-    UString version;
-    UString hash;
-    UString license;
-    std::vector<UString> dependencies;
-    UString filePath;
+struct SectionInfo {
     UString type;
     UString subtype;
     UINT32 offset;
     UINT32 size;
+    UString description;
+};
+
+struct SbomEntry {
+    // Basic SBOM fields
+    UString componentName;       // Component name
+    UString guid;               // Component GUID
+    UString version;            // Component version
+    UString build;              // Build number (separate from version)
+    UString hash;               // Component hash
+    UString license;            // License information
+    std::vector<UString> dependencies; // Component dependencies
+    UString type;               // Component type
+    UString subtype;            // Component subtype
+    UINT32 offset;              // Component offset
+    UINT32 size;                // Component size
+    UString filePath;           // File path
 
     // Additional SBOM fields based on UEFI best practices
     UString componentType;        // Driver, Application, Library, etc.
     UString architecture;         // x64, ARM64, etc.
     UString buildDate;           // Build date/time
     UString vendor;              // Vendor/Publisher
-    UString checksumAlgorithm;   // SHA256, SHA384, etc.
+    // Removed checksumAlgorithm since it's always SHA256
     UString securityAttributes;  // Secure boot, measured boot, etc.
     UString compatibility;       // UEFI version compatibility
     UString description;         // Component description
@@ -71,6 +81,43 @@ struct SbomEntry {
     UINT32 peSectionSize;        // Size of PE section
     bool isPe32File;             // Whether this entry represents a PE32 file
     std::vector<UString> containedPeFiles; // List of PE files contained in this FFS
+    std::vector<SectionInfo> sections; // List of sections contained in this FFS
+
+    // ME region metadata
+    UString meSku;        // ME SKU/Type (e.g., Corporate, Consumer)
+    UString meBuildDate;  // ME Build Date (if available)
+
+    // FFSv2 specific fields
+    UString filesystemGuid;  // Filesystem GUID for FFSv2 volumes
+    UString volumeGuid;      // Volume GUID for FFSv2 volumes
+    UString attributes;      // Attributes for FFSv2 volumes
+    UString signature;       // Signature for FFSv2 volumes
+    UString checksum;        // Checksum for FFSv2 volumes
+
+    // Region metadata
+    UString base;            // Base address for regions
+    UString address;         // Address for regions
+    UString fixed;           // Fixed status for regions
+    UString fullSize;        // Full size for regions
+    std::vector<SbomEntry> children; // Children components for regions
+    std::vector<UString> sectionInfo;   // Section information from info.txt and body.bin files
+};
+
+// PE metadata structure for enhanced extraction
+struct PeMetadata {
+    UString fileName;        // Name of the PE file
+    UString version;         // PE version
+    UString company;
+    UString fileDescription;
+    UString fileVersion;
+    UString signerCN;
+    UString copyright;
+};
+
+// Structure to hold version information
+struct VersionInfo {
+    UString versionString;
+    UString buildNumber;
 };
 
 class FfsSbomParser
@@ -87,8 +134,10 @@ public:
 
     // Export SBOM to different formats
     USTATUS exportToText(const UString& filepath);
+    USTATUS exportToStdout();
     USTATUS exportToCsv(const UString& filepath);
     USTATUS exportToJson(const UString& filepath);
+    USTATUS exportToJsonStdout();
 
     // Main parsing methods
     bool parseFfsFile(const UModelIndex& index, const UString& basePath);
@@ -105,8 +154,8 @@ public:
     UString extractArchitectureFromPeData(const UByteArray& peData);
     UString extractBuildDateFromPeData(const UByteArray& peData);
     UString extractVersionFromVersionSection(const UModelIndex& index);
-    UString searchForVersionSection(const UModelIndex& index);
-    UString parseVersionSection(const UModelIndex& index);
+    VersionInfo searchForVersionSection(const UModelIndex& index);
+    VersionInfo parseVersionSection(const UModelIndex& index);
 
     // PE32 file identification and parsing
     void identifyPe32FilesInFfs(const UModelIndex& index, SbomEntry& ffsEntry);
@@ -120,6 +169,9 @@ public:
     UString extractVersionStringFromVersionSection(const UModelIndex& ffsIndex);
 
     UString extractPeVersionFromIndex(const UModelIndex& index);
+
+    void checkForPe32ImageSectionsInChildren(const UModelIndex& index, SbomEntry& entry);
+    void postProcessPe32ImageComponents();
 
 private:
     TreeModel* model;
@@ -149,6 +201,11 @@ private:
     UString extractContactInfo(const UModelIndex& index);
     UString extractExternalReferences(const UModelIndex& index);
 
+    // ME region support
+    UString extractMeVersionFromBody(const UByteArray& body);
+    UString extractMeSkuFromBody(const UByteArray& body);
+    UString extractMeBuildDateFromBody(const UByteArray& body);
+
     // Extract PE metadata
     UString extractCompany(const UModelIndex& index);
     UString extractFileDescription(const UModelIndex& index);
@@ -156,13 +213,28 @@ private:
     UString extractCopyright(const UModelIndex& index);
     UString extractSignerCN(const UModelIndex& index);
     UString extractPeVersion(const UModelIndex& index);
-    UString calculateSha256Hash(const UModelIndex& index);
+    // Removed calculateSha256Hash - using calculateHash instead
 
     // PE image parsing helpers
     UString extractPeComponentName(const UByteArray& peData);
     UString extractPeVersion(const UByteArray& peData);
     UString extractUiString(const UModelIndex& index);
     std::vector<UString> parseDepexSection(const UModelIndex& index);
+
+    // Enhanced PE metadata extraction (Python code equivalent)
+    UString findPe32SectionInFfs(const UModelIndex& index);
+    PeMetadata extractEnhancedPeMetadata(const UString& pePath);
+    UString calculateSha256FromFile(const UString& filePath);
+    UString firstFileMatching(const UString& dirPath, const UString& pattern);
+
+    // Version section extraction
+    UString findVersionSectionInFfs(const UModelIndex& index);
+    UString extractVersionFromInfoFile(const UString& infoFilePath);
+    UString searchForVersionInfoFile(const UModelIndex& index);
+
+    // Version extraction from Version sections
+    void extractVersionFromVersionSections(const UModelIndex& index, SbomEntry& entry);
+    UString extractVersionStringFromInfoFile(const UModelIndex& versionSection);
 
     // String analysis for license detection
     UString detectLicenseFromStrings(const UByteArray& data);
@@ -173,6 +245,32 @@ private:
 
     // File utilities
     UString createSafeFilename(const UModelIndex& index, const UString& basePath);
+    UString createDumpMatchingPath(const UModelIndex& index, const UString& basePath);
+    UString findComponentPathInTree(const UModelIndex& index, const UString& targetGuid, const UString& targetName);
+    bool validateFilePath(const UString& filePath);
+    UString findActualFilePath(const UString& expectedPath);
+    UString findComponentInDump(const UModelIndex& index);
+    UString searchForComponentInDump(const std::string& dumpDir, const UString& componentId);
+    std::string findMatchingDirectory(const std::string& parentPath, const std::string& expectedName);
+
+    // BIOS Region hierarchy
+    void createBiosRegionHierarchy();
+    void trim(UString& str);
+
+    // FFSv2 metadata extraction
+    void extractFfsv2Metadata(const UString& infoFilePath, SbomEntry& entry);
+    void deduplicateContainedPeFiles(SbomEntry& entry);
+
+    // Region children population
+    void populateRegionChildren(SbomEntry& regionEntry);
+    void processSubfolderForComponent(const UString& subfolderPath, SbomEntry& parentComponent);
+    void populateSubfolderChildren(SbomEntry& parentComponent);
+
+    // PE metadata extraction from files
+    bool extractPeMetadataFromFile(const std::string& filePath, PeMetadata& peData);
+
+    // GUID to friendly name translation
+    UString translateGuidToFriendlyName(const UString& guid);
 
     // Logging
     void logProgress(const UString& message, bool isError = false);

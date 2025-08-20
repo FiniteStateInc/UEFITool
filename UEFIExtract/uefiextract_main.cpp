@@ -145,6 +145,19 @@ int main(int argc, char *argv[])
     // Check for new --sbom option
     if (argc >= 3 && !std::strcmp(argv[1], "--sbom")) {
         UString path = getAbsPath(argv[2]);
+        UString outputPath;
+        bool jsonFormat = false;
+
+        // Parse additional arguments
+        for (int i = 3; i < argc; i++) {
+            if (!std::strcmp(argv[i], "--json")) {
+                jsonFormat = true;
+            } else if (outputPath.isEmpty()) {
+                // First non-flag argument is the output path
+                outputPath = getAbsPath(argv[i]);
+            }
+        }
+
         UByteArray buffer;
         if (false == readFileIntoBuffer(path, buffer))
             return U_FILE_OPEN;
@@ -154,10 +167,30 @@ int main(int argc, char *argv[])
         if (result)
             return (int)result;
         FfsSbomParser sbomParser(&model);
-        result = sbomParser.parseSbom(model.index(0, 0), path + UString(".sbom"));
+        result = sbomParser.parseSbom(model.index(0, 0), path + UString(".dump"));
         if (result)
             return (int)result;
-        return sbomParser.exportToText(path + UString(".sbom.txt"));
+
+        // Post-process components to find PE32 image sections and calculate hashes
+        // Suppress debug messages by not outputting to stdout
+        sbomParser.postProcessPe32ImageComponents();
+
+        // Output based on format and destination
+        if (outputPath.isEmpty()) {
+            // Output to stdout
+            if (jsonFormat) {
+                return sbomParser.exportToJsonStdout();
+            } else {
+                return sbomParser.exportToStdout();
+            }
+        } else {
+            // Output to file
+            if (jsonFormat) {
+                return sbomParser.exportToJson(outputPath);
+            } else {
+                return sbomParser.exportToText(outputPath);
+            }
+        }
     }
 
     // Check that input file exists

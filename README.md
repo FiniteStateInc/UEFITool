@@ -2,23 +2,23 @@
 
 UEFITool is a viewer and editor of firmware images conforming to UEFI Platform Interface (PI) Specifications.
 
-![UEFITool icon](https://raw.githubusercontent.com/LongSoft/UEFITool/new_engine/UEFITool/icons/uefitool_64x64.png "UEFITool icon")  
+![UEFITool icon](https://raw.githubusercontent.com/LongSoft/UEFITool/new_engine/UEFITool/icons/uefitool_64x64.png "UEFITool icon")
 ![CI Status](https://github.com/LongSoft/UEFITool/actions/workflows/main.yml/badge.svg?branch=new_engine) [![Scan Status](https://scan.coverity.com/projects/17209/badge.svg?flat=1)](https://scan.coverity.com/projects/17209) [![Quality Gate Status](https://sonarcloud.io/api/project_badges/measure?project=LongSoft_UEFITool&metric=alert_status)](https://sonarcloud.io/summary/new_code?id=LongSoft_UEFITool)
 
 
 ## Very Brief Introduction to UEFI
 
-Unified Extensible Firmware Interface or UEFI is a post-BIOS firmware specification originally written by Intel for Itanium architecture and than adapted for X86 systems.  
-The first EFI-compatible x86 firmwares were used on Apple Macintosh systems in 2006 and PC motherboard vendors started putting UEFI-compatible firmwares on their boards in 2011.  
-In 2015 there are numerous systems using UEFI-compatible firmware including PCs, Macs, Tablets and Smartphones on x86, x86-64 and ARM architectures.  
-More information on UEFI is available on [UEFI Forum official site](http://www.uefi.org/faq) and in [Wikipedia](http://en.wikipedia.org/wiki/Unified_Extensible_Firmware_Interface).  
-  
+Unified Extensible Firmware Interface or UEFI is a post-BIOS firmware specification originally written by Intel for Itanium architecture and than adapted for X86 systems.
+The first EFI-compatible x86 firmwares were used on Apple Macintosh systems in 2006 and PC motherboard vendors started putting UEFI-compatible firmwares on their boards in 2011.
+In 2015 there are numerous systems using UEFI-compatible firmware including PCs, Macs, Tablets and Smartphones on x86, x86-64 and ARM architectures.
+More information on UEFI is available on [UEFI Forum official site](http://www.uefi.org/faq) and in [Wikipedia](http://en.wikipedia.org/wiki/Unified_Extensible_Firmware_Interface).
+
 ## Very Brief Introduction to UEFITool
 
-UEFITool is a cross-platform open source application written in C++/Qt, that parses UEFI-compatible firmware image into a tree structure, verifies image's integrity and provides a GUI to manipulate image's elements.  
-Project development started in the middle of 2013 because of the lack of cross-platform open source utilities for tinkering with UEFI images.  
+UEFITool is a cross-platform open source application written in C++/Qt, that parses UEFI-compatible firmware image into a tree structure, verifies image's integrity and provides a GUI to manipulate image's elements.
+Project development started in the middle of 2013 because of the lack of cross-platform open source utilities for tinkering with UEFI images.
 
-In the beginning of 2015 the major refactoring round was started to make the program compatible with newer UEFI features including FFSv3 volumes and fixed image elements. 
+In the beginning of 2015 the major refactoring round was started to make the program compatible with newer UEFI features including FFSv3 volumes and fixed image elements.
 It's in development right now with the following features still missing:
 * Editor part, i.e image reconstruction routines
 * Console UI
@@ -42,16 +42,16 @@ Right now there are some alternatives to UEFITool that you could find useful too
 
 ## Installation
 
-You can either use [pre-built binaries](https://github.com/LongSoft/UEFITool/releases) or build a binary yourself.  
+You can either use [pre-built binaries](https://github.com/LongSoft/UEFITool/releases) or build a binary yourself.
 * To build a binary that uses Qt library (UEFITool) you need a C++ compiler and an instance of [Qt5 or Qt6](https://www.qt.io) library. Install both of them, get the sources, generate makefiles using qmake (`qmake ./UEFITool/uefitool.pro`) and use your system's make command on that generated files (i.e. `nmake release`, `make release` and so on). Qt6-based builds can also use CMAKE as an altearnative build system.
 * To build a binary that doesn't use Qt (UEFIExtract, UEFIFind), you need a C++ compiler and [CMAKE](https://cmake.org) utility to generate a makefile for your OS and build environment. Install both of them, get the sources, generate makefiles using cmake (`cmake UEFIExtract`) and use your system's make command on that generated files (i.e. `nmake release`, `make release` and so on). Non-Qt builds can also use Meson as an alternative build system.
 
 ## Known issues
 
-* Image editing is currently only possible using an outdated and unsupported UEFITool 0.28 (`old_engine` branch) and the tools based on it (`UEFIReplace`, `UEFIPatch`). This is the top priority [issue #67](https://github.com/LongSoft/UEFITool/issues/67), which is being worked on, albeit slowly (due to the amount of coding and testing required to implement it correctly). 
+* Image editing is currently only possible using an outdated and unsupported UEFITool 0.28 (`old_engine` branch) and the tools based on it (`UEFIReplace`, `UEFIPatch`). This is the top priority [issue #67](https://github.com/LongSoft/UEFITool/issues/67), which is being worked on, albeit slowly (due to the amount of coding and testing required to implement it correctly).
 * Some vendor-specific firmware update files can be opened incorrectly or can't be opened at all. This includes encrypted HP update files, Dell HDR and EXE files, some InsydeFlash FD files and so on. Enabling support for such files will require massive amount of reverse-engineering which is almost pointless because the updated image can be obtained from BIOS chip where it's already decrypted and unpacked.
 * Intel Firmware Interface Table (FIT) editing is not supported right now. FIT contains pointers to various image components that must be loaded before executing the first CPU instruction from the BIOS chip. Those components include CPU microcode updates, binaries and settings used by BIOS Guard and Boot Guard technologies and some other stuff. More information on FIT can be obtained [here](https://edc.intel.com/content/www/us/en/design/products-and-solutions/software-and-services/firmware-and-bios/firmware-interface-table/firmware-interface-table/).
-* Windows builds of `UEFIExtract` and `UEFIFind` might encouter an issue with folder paths being longer than 260 bytes (`MAX_PATH`) on some input files (see [issue #363](https://github.com/LongSoft/UEFITool/issues/363)). This is a [known Windows limitation](https://learn.microsoft.com/en-us/windows/win32/fileio/maximum-file-path-limitation?tabs=registry), that can be fixed by enabling long paths support via Windows Registry and adding a manifest to the executable file that requires such support. `UEFIExtract` has the required manifest additions since version `A67`, and the required registry file is provided by Microsoft on the page linked above, but this workaround is only awailable starting with Windows 10 build 1067.   
+* Windows builds of `UEFIExtract` and `UEFIFind` might encouter an issue with folder paths being longer than 260 bytes (`MAX_PATH`) on some input files (see [issue #363](https://github.com/LongSoft/UEFITool/issues/363)). This is a [known Windows limitation](https://learn.microsoft.com/en-us/windows/win32/fileio/maximum-file-path-limitation?tabs=registry), that can be fixed by enabling long paths support via Windows Registry and adding a manifest to the executable file that requires such support. `UEFIExtract` has the required manifest additions since version `A67`, and the required registry file is provided by Microsoft on the page linked above, but this workaround is only awailable starting with Windows 10 build 1067.
 
 ## Bug repellents
 
@@ -63,3 +63,240 @@ You can either use [pre-built binaries](https://github.com/LongSoft/UEFITool/rel
 Every new release includes an update to the database of known UEFI-related GUIDs build with help of [Linux Vendor Firmware Service](https://fwupd.org).
 
 You can download the up-to-date version of that database using [this link](https://fwupd.org/lvfs/shards/export/csv).
+
+# UEFI FFS PE Analyzer
+
+A Python utility for analyzing UEFI firmware images, extracting FFS (Firmware File System) files and embedded PE (Portable Executable) files, and generating comprehensive SBOM (Software Bill of Materials) metadata.
+
+## Features
+
+- **FFS File Analysis**: Extracts UEFI FFS files and their metadata
+- **PE File Extraction**: Identifies and extracts embedded PE files from FFS files
+- **SBOM Metadata**: Generates comprehensive metadata including:
+  - Version information
+  - Publisher/Company details
+  - File descriptions
+  - PE version strings
+  - Architecture information
+  - Build dates
+  - Digital signatures
+  - SHA-256 hashes
+  - File dependencies
+- **Multiple Output Formats**: Supports text, CSV, and JSON output formats
+
+## Installation
+
+1. **Clone or download the utility files**:
+   ```bash
+   git clone <repository-url>
+   cd uefi-ffs-pe-analyzer
+   ```
+
+2. **Install dependencies**:
+   ```bash
+   pip install -r requirements.txt
+   ```
+
+   Or install manually:
+   ```bash
+   pip install pefile uefi-firmware
+   ```
+
+## Usage
+
+### Basic Usage
+
+```bash
+python uefi_ffs_pe_analyzer.py firmware.bin
+```
+
+This will analyze the firmware file and generate a text report with default naming.
+
+### Advanced Usage
+
+```bash
+# Generate text report
+python uefi_ffs_pe_analyzer.py firmware.bin --output report.txt --format text
+
+# Generate CSV report
+python uefi_ffs_pe_analyzer.py firmware.bin --output report.csv --format csv
+
+# Generate JSON report
+python uefi_ffs_pe_analyzer.py firmware.bin --output report.json --format json
+
+# Verbose output
+python uefi_ffs_pe_analyzer.py firmware.bin --verbose
+```
+
+### Command Line Options
+
+- `firmware_file`: Path to the UEFI firmware file to analyze
+- `--output, -o`: Output file path (default: `{firmware_name}_sbom.{format}`)
+- `--format, -f`: Output format (`text`, `csv`, or `json`, default: `text`)
+- `--verbose, -v`: Enable verbose logging
+- `--help, -h`: Show help message
+
+## Output Formats
+
+### Text Format
+Human-readable text report with detailed information about each FFS file and embedded PE file:
+
+```
+FFS File 1: 12345678-9ABC-DEF0-1234-56789ABCDEF0
+  Component Name: FFS_12345678
+  GUID: 12345678-9ABC-DEF0-1234-56789ABCDEF0
+  Version: 1.2.3.4
+  Type: FFS File
+  Subtype: DXE driver
+  Offset: 0x00001234
+  Size: 65536 bytes
+  Architecture: x64
+  Vendor: Unknown
+  Contained PE Files:
+    PE File 1: MyDriver
+      Version: 1.2.3.4
+      Publisher: Acme Corp
+      Description: ACME UEFI DXE Driver
+      PE Version: 1.2.3.4
+      Architecture: x64
+      SHA-256 Hash: 9a8b7c6d...
+```
+
+### CSV Format
+Comma-separated values suitable for spreadsheet analysis or database import.
+
+### JSON Format
+Structured JSON data with metadata and detailed information about all discovered files.
+
+## Extracted Information
+
+### FFS File Information
+- **GUID**: Unique identifier for the FFS file
+- **Name**: Component name
+- **Type/Subtype**: UEFI file type classification
+- **Offset/Size**: Location and size in firmware
+- **Version**: Version information
+- **Vendor**: Publisher information
+- **Architecture**: Target architecture
+- **Build Date**: Compilation timestamp
+- **Security Attributes**: Security-related flags
+- **Compatibility**: UEFI version compatibility
+
+### PE File Information
+- **Version**: File version from PE resources
+- **Publisher**: Company name from PE resources
+- **Description**: File description from PE resources
+- **PE Version**: PE-specific version string
+- **Company**: Company name
+- **Copyright**: Copyright information
+- **Digital Signer**: Digital signature details
+- **Architecture**: Target architecture (x86, x64, ARM, etc.)
+- **Build Date**: Compilation timestamp
+- **SHA-256 Hash**: Cryptographic hash of the PE file
+- **File Size**: Size of the PE file
+- **Subsystem**: PE subsystem type
+- **Machine Type**: Target machine architecture
+
+## Dependencies
+
+### Required
+- **pefile**: Python library for parsing PE (Portable Executable) files
+- **uefi-firmware**: Python library for parsing UEFI firmware images
+
+### Optional
+- **structlog**: Enhanced logging (uncomment in requirements.txt)
+- **click**: Better CLI interface (uncomment in requirements.txt)
+
+## Limitations
+
+1. **PE Resource Parsing**: Version resource extraction depends on the `pefile` library
+2. **UEFI Parsing**: Firmware parsing depends on the `uefi-firmware` library
+3. **Compressed Files**: May not handle all compression formats
+4. **Encrypted Files**: Cannot analyze encrypted firmware components
+
+## Troubleshooting
+
+### Common Issues
+
+1. **"pefile library not available"**
+   ```bash
+   pip install pefile
+   ```
+
+2. **"uefi_firmware library not available"**
+   ```bash
+   pip install uefi-firmware
+   ```
+
+3. **No FFS files found**
+   - Verify the input file is a valid UEFI firmware image
+   - Try with `--verbose` flag for more detailed output
+
+4. **Permission errors**
+   - Ensure you have read access to the firmware file
+   - Ensure you have write access to the output directory
+
+### Debug Mode
+
+Use the `--verbose` flag for detailed logging:
+
+```bash
+python uefi_ffs_pe_analyzer.py firmware.bin --verbose
+```
+
+## Example Output
+
+### Sample Text Report
+```
+UEFI FFS PE Analyzer - SBOM Report
+==================================================
+Generated: 2024-01-15 14:30:25
+Total FFS Files: 15
+Total PE Files: 23
+
+FFS File 1: 12345678-9ABC-DEF0-1234-56789ABCDEF0
+  Component Name: FFS_12345678
+  GUID: 12345678-9ABC-DEF0-1234-56789ABCDEF0
+  Version: 1.2.3.4
+  Type: FFS File
+  Subtype: DXE driver
+  Offset: 0x00001234
+  Size: 65536 bytes
+  Architecture: x64
+  Vendor: Unknown
+  Security Attributes: Standard
+  Compatibility: UEFI 2.x
+  Contained PE Files:
+    PE File 1: MyDriver
+      Version: 1.2.3.4
+      Publisher: Acme Corp
+      Description: ACME UEFI DXE Driver
+      PE Version: 1.2.3.4
+      Company: Acme Corporation
+      Copyright: Copyright (c) 2024 Acme Corp
+      Digital Signer: CN=Acme Signing Authority
+      Architecture: x64
+      Build Date: Timestamp: 0x5F3759DF
+      SHA-256 Hash: 9a8b7c6d5e4f3a2b1c0d9e8f7a6b5c4d3e2f1a0b9c8d7e6f5a4b3c2d1e0f9a8b
+      File Size: 32768 bytes
+      Subsystem: EFI Boot Service Driver
+      Machine Type: x64
+```
+
+## Contributing
+
+1. Fork the repository
+2. Create a feature branch
+3. Make your changes
+4. Add tests if applicable
+5. Submit a pull request
+
+## License
+
+This project is licensed under the BSD License - see the LICENSE file for details.
+
+## Acknowledgments
+
+- UEFI Forum for the UEFI specification
+- Microsoft for the PE file format specification
+- The `pefile` and `uefi-firmware` library maintainers

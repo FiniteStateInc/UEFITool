@@ -1,0 +1,9 @@
+# UEFI FFS PE Analyzer Dependencies
+
+# Core dependencies
+pefile>=2023.2.7
+uefi-firmware>=1.9
+
+# Optional dependencies for enhanced functionality
+# structlog>=23.1.0  # Enhanced logging
+# click>=8.1.3       # Better CLI interface
