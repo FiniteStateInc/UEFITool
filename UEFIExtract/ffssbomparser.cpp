@@ -30,6 +30,27 @@ WITHOUT WARRANTIES OR REPRESENTATIONS OF ANY KIND, EITHER EXPRESS OR IMPLIED.
 #include <sys/stat.h>
 #include <set>
 
+// Helper function to safely convert UString to const char* for JSON output
+const char* safeStringConversion(const UString& str) {
+    // Use toLocal8Bit() but ensure we don't get null bytes
+    const char* data = str.toLocal8Bit();
+    if (data) {
+        // Find the first null byte and truncate there
+        const char* nullPos = strchr(data, '\0');
+        if (nullPos && nullPos != data) {
+            // Create a temporary string without null bytes
+            static char tempBuffer[4096];
+            size_t len = nullPos - data;
+            if (len < sizeof(tempBuffer) - 1) {
+                strncpy(tempBuffer, data, len);
+                tempBuffer[len] = '\0';
+                return tempBuffer;
+            }
+        }
+    }
+    return data ? data : "";
+}
+
 // Helper: trim whitespace from both ends
 static void trimws(CBString& str) {
     // Left trim
@@ -73,6 +94,7 @@ USTATUS FfsSbomParser::parseSbom(const UModelIndex& root, const UString& outputP
     // Clear previous entries
     sbomEntries.clear();
     processedGuids.clear();
+    processedComponents.clear();
 
     // Create the BIOS region hierarchy first
     createBiosRegionHierarchy();
@@ -81,27 +103,27 @@ USTATUS FfsSbomParser::parseSbom(const UModelIndex& root, const UString& outputP
 
     if (result == U_SUCCESS) {
         logProgress("SBOM parsing completed successfully");
-        printf("SBOM Statistics:\n");
-        printf("  Total Components Found: %zu\n", sbomEntries.size());
-        printf("  Components with Names: %zu\n",
-            std::count_if(sbomEntries.begin(), sbomEntries.end(),
-                [](const SbomEntry& entry) { return !entry.componentName.isEmpty(); }));
-        printf("  Components with Versions: %zu\n",
-            std::count_if(sbomEntries.begin(), sbomEntries.end(),
-                [](const SbomEntry& entry) { return !entry.version.isEmpty(); }));
-        printf("  Components with Dependencies: %zu\n",
-            std::count_if(sbomEntries.begin(), sbomEntries.end(),
-                [](const SbomEntry& entry) { return !entry.dependencies.empty(); }));
+            printf("SBOM Statistics:\n");
+            printf("  Total Components Found: %zu\n", sbomEntries.size());
+            printf("  Components with Names: %zu\n",
+                std::count_if(sbomEntries.begin(), sbomEntries.end(),
+                    [](const SbomEntry& entry) { return !entry.componentName.isEmpty(); }));
+            printf("  Components with Versions: %zu\n",
+                std::count_if(sbomEntries.begin(), sbomEntries.end(),
+                    [](const SbomEntry& entry) { return !entry.version.isEmpty(); }));
+            printf("  Components with Dependencies: %zu\n",
+                std::count_if(sbomEntries.begin(), sbomEntries.end(),
+                    [](const SbomEntry& entry) { return !entry.dependencies.empty(); }));
 
-        // Count PE files
-        size_t peFiles = std::count_if(sbomEntries.begin(), sbomEntries.end(),
-            [](const SbomEntry& entry) { return entry.isPe32File; });
-        printf("  PE32 Files Found: %zu\n", peFiles);
+            // Count PE files
+            size_t peFiles = std::count_if(sbomEntries.begin(), sbomEntries.end(),
+                [](const SbomEntry& entry) { return entry.isPe32File; });
+            printf("  PE32 Files Found: %zu\n", peFiles);
 
-        // Count FFS files with PE files
-        size_t ffsWithPe = std::count_if(sbomEntries.begin(), sbomEntries.end(),
-            [](const SbomEntry& entry) { return !entry.isPe32File && !entry.containedPeFiles.empty(); });
-        printf("  FFS Files with PE Files: %zu\n", ffsWithPe);
+            // Count FFS files with PE files
+            size_t ffsWithPe = std::count_if(sbomEntries.begin(), sbomEntries.end(),
+                [](const SbomEntry& entry) { return !entry.isPe32File && !entry.containedPeFiles.empty(); });
+            printf("  FFS Files with PE Files: %zu\n", ffsWithPe);
     } else {
         logProgress("SBOM parsing failed", true);
     }
@@ -145,6 +167,11 @@ USTATUS FfsSbomParser::parseSbomRecursive(const UModelIndex& index, const UStrin
     if (model->type(index) == Types::File) {
         // Use enhanced recursive parsing to extract PE metadata from embedded sections
         parseFfsFileRecursive(index, basePath);
+    }
+
+    // Skip sections at the top level - they should only appear as children
+    if (model->type(index) == Types::Section) {
+        return U_SUCCESS;
     }
 
     // Recursively process children
@@ -193,9 +220,23 @@ bool FfsSbomParser::parseFfsFile(const UModelIndex& index, const UString& basePa
         }
     }
 
-    // Skip if already processed
+    // Skip if already processed (check both GUID and offset for better deduplication)
     if (!entry.guid.isEmpty() && processedGuids.find(entry.guid) != processedGuids.end()) {
         return true;
+    }
+
+    // Also check if we've already processed this component by name and offset
+    UString componentKey = entry.componentName + "_" + usprintf("0x%08X", model->offset(index));
+    if (processedComponents.find(componentKey) != processedComponents.end()) {
+        return true;
+    }
+
+    // If we have a GUID, also check if we've already processed this GUID at any offset
+    if (!entry.guid.isEmpty()) {
+        UString guidKey = "GUID_" + entry.guid;
+        if (processedComponents.find(guidKey) != processedComponents.end()) {
+            return true;
+        }
     }
 
     // Extract basic information
@@ -279,6 +320,12 @@ bool FfsSbomParser::parseFfsFile(const UModelIndex& index, const UString& basePa
             return true;
         }
 
+        // Skip components with .efi in their name - these should be handled as PE32 files within their parent
+        if (entry.componentName.find(".efi") != (size_t)-1) {
+            logProgress("Skipping .efi component from top-level SBOM: " + entry.componentName);
+            return true;
+        }
+
         // Generate a fallback component name if none exists
         if (entry.componentName.isEmpty()) {
             entry.componentName = usprintf("FFS_%s", entry.guid.toLocal8Bit());
@@ -325,11 +372,43 @@ bool FfsSbomParser::parseFfsFile(const UModelIndex& index, const UString& basePa
                 }
             }
 
-            // Check if this is a PE32 image section and flag the component as a PE image
+            // Check if this is a PE32 image section and create a separate PE32 file entry
             if (model->type(sectionIndex) == Types::Section && model->subtype(sectionIndex) == EFI_SECTION_PE32) {
                 // Flag the component as a PE image
                 entry.isPe32File = true;
                 logProgress("[DEBUG] Found PE32 image section in parseFfsFile for component: " + entry.componentName);
+
+                // Create a separate PE32 file entry
+                SbomEntry pe32Entry;
+                pe32Entry.componentName = entry.componentName + "_TE.efi";
+                pe32Entry.guid = usprintf("PE32_%s_%08X", entry.guid.toLocal8Bit(), model->offset(sectionIndex));
+                pe32Entry.type = "PE32_File";
+                pe32Entry.subtype = "TE";
+                pe32Entry.offset = model->offset(sectionIndex);
+                pe32Entry.size = model->body(sectionIndex).size();
+                pe32Entry.componentType = "Driver";
+                pe32Entry.architecture = "";
+                pe32Entry.buildDate = "";
+                pe32Entry.vendor = "";
+                pe32Entry.securityAttributes = "Standard";
+                pe32Entry.compatibility = "UEFI 2.x";
+                pe32Entry.description = "PE32 executable from " + entry.componentName;
+                pe32Entry.sourceLocation = "";
+                pe32Entry.contactInfo = "";
+                pe32Entry.externalReferences = "";
+                pe32Entry.company = "";
+                pe32Entry.fileDescription = "";
+                pe32Entry.fileVersion = "";
+                pe32Entry.copyright = "";
+                pe32Entry.signerCN = "";
+                pe32Entry.peVersion = "";
+                pe32Entry.sha256Hash = "";
+                pe32Entry.parentFfsGuid = entry.guid;
+                pe32Entry.parentFfsName = entry.componentName;
+                pe32Entry.peFileName = entry.componentName + "_TE.efi";
+                pe32Entry.peSectionType = "TE";
+                pe32Entry.peSectionOffset = model->offset(sectionIndex);
+                pe32Entry.peSectionSize = model->body(sectionIndex).size();
 
                 // Calculate SHA256 hash from the PE32 section data
                 if (!model->hasEmptyBody(sectionIndex)) {
@@ -343,12 +422,88 @@ bool FfsSbomParser::parseFfsFile(const UModelIndex& index, const UString& basePa
                         hashString += usprintf("%02X", hash[i]);
                     }
 
-                    // Store the hash in the component
+                    // Store the hash in both the parent component and PE32 entry
                     entry.hash = hashString;
+                    pe32Entry.hash = hashString;
+                    pe32Entry.sha256Hash = hashString;
                     logProgress("Calculated PE32 hash for component " + entry.componentName + ": " + hashString);
                 } else {
                     logProgress("[DEBUG] PE32 section has empty body for component: " + entry.componentName);
                 }
+
+                // Add PE32 entry to the list
+                sbomEntries.push_back(pe32Entry);
+                processedGuids.insert(pe32Entry.guid);
+
+                // Add to parent's contained PE files
+                entry.containedPeFiles.push_back(pe32Entry.componentName);
+            }
+
+            // Check if this is a TE image section and create a separate TE file entry
+            if (model->type(sectionIndex) == Types::Section && model->subtype(sectionIndex) == EFI_SECTION_TE) {
+                // Flag the component as a PE image
+                entry.isPe32File = true;
+                logProgress("[DEBUG] Found TE image section in parseFfsFile for component: " + entry.componentName);
+
+                // Create a separate TE file entry
+                SbomEntry teEntry;
+                teEntry.componentName = entry.componentName + "_TE.efi";
+                teEntry.guid = usprintf("TE_%s_%08X", entry.guid.toLocal8Bit(), model->offset(sectionIndex));
+                teEntry.type = "PE32_File";
+                teEntry.subtype = "TE";
+                teEntry.offset = model->offset(sectionIndex);
+                teEntry.size = model->body(sectionIndex).size();
+                teEntry.componentType = "Driver";
+                teEntry.architecture = "";
+                teEntry.buildDate = "";
+                teEntry.vendor = "";
+                teEntry.securityAttributes = "Standard";
+                teEntry.compatibility = "UEFI 2.x";
+                teEntry.description = "PE32 executable from " + entry.componentName;
+                teEntry.sourceLocation = "";
+                teEntry.contactInfo = "";
+                teEntry.externalReferences = "";
+                teEntry.company = "";
+                teEntry.fileDescription = "";
+                teEntry.fileVersion = "";
+                teEntry.copyright = "";
+                teEntry.signerCN = "";
+                teEntry.peVersion = "";
+                teEntry.sha256Hash = "";
+                teEntry.parentFfsGuid = entry.guid;
+                teEntry.parentFfsName = entry.componentName;
+                teEntry.peFileName = entry.componentName + "_TE.efi";
+                teEntry.peSectionType = "TE";
+                teEntry.peSectionOffset = model->offset(sectionIndex);
+                teEntry.peSectionSize = model->body(sectionIndex).size();
+
+                // Calculate SHA256 hash from the TE section data
+                if (!model->hasEmptyBody(sectionIndex)) {
+                    const UByteArray& teData = model->body(sectionIndex);
+                    logProgress("[DEBUG] TE section data size: " + usprintf("%d", teData.size()));
+                    UINT8 hash[32]; // SHA256 produces 32 bytes
+                    sha256(teData.constData(), teData.size(), hash);
+
+                    UString hashString;
+                    for (int i = 0; i < 32; i++) {
+                        hashString += usprintf("%02X", hash[i]);
+                    }
+
+                    // Store the hash in both the parent component and TE entry
+                    entry.hash = hashString;
+                    teEntry.hash = hashString;
+                    teEntry.sha256Hash = hashString;
+                    logProgress("Calculated TE hash for component " + entry.componentName + ": " + hashString);
+                } else {
+                    logProgress("[DEBUG] TE section has empty body for component: " + entry.componentName);
+                }
+
+                // Add TE entry to the list
+                sbomEntries.push_back(teEntry);
+                processedGuids.insert(teEntry.guid);
+
+                // Add to parent's contained PE files
+                entry.containedPeFiles.push_back(teEntry.componentName);
             }
         }
 
@@ -357,6 +512,10 @@ bool FfsSbomParser::parseFfsFile(const UModelIndex& index, const UString& basePa
 
         sbomEntries.push_back(entry);
         processedGuids.insert(entry.guid);
+        processedComponents.insert(componentKey);
+        if (!entry.guid.isEmpty()) {
+            processedComponents.insert("GUID_" + entry.guid);
+        }
         logProgress("Parsed FFS file: " + entry.componentName);
         return true;
     } else {
@@ -449,6 +608,11 @@ bool FfsSbomParser::parseFfsFile(const UModelIndex& index, const UString& basePa
                 }
             }
             sbomEntries.push_back(entry);
+            processedGuids.insert(entry.guid);
+            processedComponents.insert(componentKey);
+            if (!entry.guid.isEmpty()) {
+                processedComponents.insert("GUID_" + entry.guid);
+            }
             logProgress("Parsed FFS file (Variable GUID): " + entry.componentName);
             return true;
         }
@@ -1322,102 +1486,7 @@ USTATUS FfsSbomParser::exportToCsv(const UString& filepath)
     return U_SUCCESS;
 }
 
-USTATUS FfsSbomParser::exportToJson(const UString& filepath)
-{
-    std::ofstream file(filepath.toLocal8Bit());
-    if (!file.is_open()) {
-        logProgress("Cannot open file for writing: " + filepath, true);
-        return U_FILE_OPEN;
-    }
 
-    file << "{\n";
-    file << "  \"sbom\": {\n";
-    file << "    \"format\": \"FFS Software Bill of Materials\",\n";
-    file << "    \"version\": \"1.0\",\n";
-    file << "    \"components\": [\n";
-
-    for (size_t i = 0; i < sbomEntries.size(); i++) {
-        const SbomEntry& entry = sbomEntries[i];
-
-        file << "      {\n";
-        file << "        \"componentName\": \"" << entry.componentName.toLocal8Bit() << "\",\n";
-        file << "        \"guid\": \"" << entry.guid.toLocal8Bit() << "\",\n";
-        file << "        \"version\": \"" << entry.version.toLocal8Bit() << "\",\n";
-        file << "        \"hash\": \"" << entry.hash.toLocal8Bit() << "\",\n";
-        file << "        \"license\": \"" << entry.license.toLocal8Bit() << "\",\n";
-        file << "        \"type\": \"" << entry.type.toLocal8Bit() << "\",\n";
-        file << "        \"subtype\": \"" << entry.subtype.toLocal8Bit() << "\",\n";
-        file << "        \"offset\": \"0x" << std::hex << entry.offset << "\",\n";
-        file << "        \"size\": " << std::dec << entry.size << ",\n";
-        file << "        \"filePath\": \"" << entry.filePath.toLocal8Bit() << "\",\n";
-        file << "        \"componentType\": \"" << entry.componentType.toLocal8Bit() << "\",\n";
-        file << "        \"architecture\": \"" << entry.architecture.toLocal8Bit() << "\",\n";
-        file << "        \"buildDate\": \"" << entry.buildDate.toLocal8Bit() << "\",\n";
-        file << "        \"vendor\": \"" << entry.vendor.toLocal8Bit() << "\",\n";
-        // Removed checksumAlgorithm since it's always SHA256
-        file << "        \"securityAttributes\": \"" << entry.securityAttributes.toLocal8Bit() << "\",\n";
-        file << "        \"compatibility\": \"" << entry.compatibility.toLocal8Bit() << "\",\n";
-        file << "        \"description\": \"" << entry.description.toLocal8Bit() << "\",\n";
-        file << "        \"sourceLocation\": \"" << entry.sourceLocation.toLocal8Bit() << "\",\n";
-        file << "        \"contactInfo\": \"" << entry.contactInfo.toLocal8Bit() << "\",\n";
-        file << "        \"externalReferences\": \"" << entry.externalReferences.toLocal8Bit() << "\",\n";
-        file << "        \"company\": \"" << entry.company.toLocal8Bit() << "\",\n";
-        file << "        \"fileDescription\": \"" << entry.fileDescription.toLocal8Bit() << "\",\n";
-        file << "        \"fileVersion\": \"" << entry.fileVersion.toLocal8Bit() << "\",\n";
-        file << "        \"copyright\": \"" << entry.copyright.toLocal8Bit() << "\",\n";
-        file << "        \"digitalSigner\": \"" << entry.signerCN.toLocal8Bit() << "\",\n";
-        file << "        \"peVersion\": \"" << entry.peVersion.toLocal8Bit() << "\",\n";
-        file << "        \"sha256Hash\": \"" << entry.sha256Hash.toLocal8Bit() << "\",\n";
-        file << "        \"isPe32File\": " << (entry.isPe32File ? "true" : "false") << ",\n";
-        file << "        \"parentFfsGuid\": \"" << entry.parentFfsGuid.toLocal8Bit() << "\",\n";
-        file << "        \"parentFfsName\": \"" << entry.parentFfsName.toLocal8Bit() << "\",\n";
-        file << "        \"peFileName\": \"" << entry.peFileName.toLocal8Bit() << "\",\n";
-        file << "        \"peSectionType\": \"" << entry.peSectionType.toLocal8Bit() << "\",\n";
-        file << "        \"peSectionOffset\": \"0x" << std::hex << entry.peSectionOffset << "\",\n";
-        file << "        \"peSectionSize\": " << std::dec << entry.peSectionSize << ",\n";
-
-        file << "        \"containedPeFiles\": [";
-        for (size_t j = 0; j < entry.containedPeFiles.size(); j++) {
-            if (j > 0) file << ", ";
-            file << "\"" << entry.containedPeFiles[j].toLocal8Bit() << "\"";
-        }
-        file << "],\n";
-
-        file << "        \"dependencies\": [";
-        for (size_t j = 0; j < entry.dependencies.size(); j++) {
-            if (j > 0) file << ", ";
-            file << "\"" << entry.dependencies[j].toLocal8Bit() << "\"";
-        }
-        file << "],\n";
-
-        file << "        \"sections\": [\n";
-        for (size_t j = 0; j < entry.sections.size(); j++) {
-            if (j > 0) file << ",\n";
-            file << "          {\n";
-            file << "            \"type\": \"" << entry.sections[j].type.toLocal8Bit() << "\",\n";
-            file << "            \"subtype\": \"" << entry.sections[j].subtype.toLocal8Bit() << "\",\n";
-            file << "            \"offset\": \"0x" << std::hex << entry.sections[j].offset << "\",\n";
-            file << "            \"size\": " << std::dec << entry.sections[j].size << ",\n";
-            file << "            \"description\": \"" << entry.sections[j].description.toLocal8Bit() << "\"\n";
-            file << "          }\n";
-        }
-        file << "        ]\n";
-
-        if (i < sbomEntries.size() - 1) {
-            file << "      },\n";
-        } else {
-            file << "      }\n";
-        }
-    }
-
-    file << "    ]\n";
-    file << "  }\n";
-    file << "}\n";
-
-    file.close();
-    logProgress("SBOM exported to JSON file: " + filepath);
-    return U_SUCCESS;
-}
 
 USTATUS FfsSbomParser::exportToJsonStdout()
 {
@@ -1441,26 +1510,24 @@ USTATUS FfsSbomParser::exportToJsonStdout()
         std::cout << "        \"subtype\": \"" << entry.subtype.toLocal8Bit() << "\",\n";
         std::cout << "        \"offset\": \"0x" << std::hex << entry.offset << "\",\n";
         std::cout << "        \"size\": " << std::dec << entry.size << ",\n";
-        std::cout << "        \"filePath\": \"" << entry.filePath.toLocal8Bit() << "\",\n";
-        std::cout << "        \"componentType\": \"" << entry.componentType.toLocal8Bit() << "\",\n";
-        std::cout << "        \"architecture\": \"" << entry.architecture.toLocal8Bit() << "\",\n";
-        std::cout << "        \"buildDate\": \"" << entry.buildDate.toLocal8Bit() << "\",\n";
-        std::cout << "        \"vendor\": \"" << entry.vendor.toLocal8Bit() << "\",\n";
+        std::cout << "        \"componentType\": \"" << (entry.componentType == "Unknown" ? "" : entry.componentType.toLocal8Bit()) << "\",\n";
+        std::cout << "        \"architecture\": \"" << (entry.architecture == "Unknown" ? "" : entry.architecture.toLocal8Bit()) << "\",\n";
+        std::cout << "        \"buildDate\": \"" << (entry.buildDate == "Unknown" ? "" : entry.buildDate.toLocal8Bit()) << "\",\n";
+        std::cout << "        \"vendor\": \"" << (entry.vendor == "Unknown" ? "" : entry.vendor.toLocal8Bit()) << "\",\n";
         // Removed checksumAlgorithm since it's always SHA256
-        std::cout << "        \"securityAttributes\": \"" << entry.securityAttributes.toLocal8Bit() << "\",\n";
-        std::cout << "        \"compatibility\": \"" << entry.compatibility.toLocal8Bit() << "\",\n";
-        std::cout << "        \"description\": \"" << entry.description.toLocal8Bit() << "\",\n";
-        std::cout << "        \"sourceLocation\": \"" << entry.sourceLocation.toLocal8Bit() << "\",\n";
-        std::cout << "        \"contactInfo\": \"" << entry.contactInfo.toLocal8Bit() << "\",\n";
-        std::cout << "        \"externalReferences\": \"" << entry.externalReferences.toLocal8Bit() << "\",\n";
-        std::cout << "        \"company\": \"" << entry.company.toLocal8Bit() << "\",\n";
-        std::cout << "        \"fileDescription\": \"" << entry.fileDescription.toLocal8Bit() << "\",\n";
-        std::cout << "        \"fileVersion\": \"" << entry.fileVersion.toLocal8Bit() << "\",\n";
-        std::cout << "        \"copyright\": \"" << entry.copyright.toLocal8Bit() << "\",\n";
-        std::cout << "        \"digitalSigner\": \"" << entry.signerCN.toLocal8Bit() << "\",\n";
-        std::cout << "        \"peVersion\": \"" << entry.peVersion.toLocal8Bit() << "\",\n";
+        std::cout << "        \"securityAttributes\": \"" << (entry.securityAttributes == "None" ? "" : entry.securityAttributes.toLocal8Bit()) << "\",\n";
+        std::cout << "        \"compatibility\": \"" << (entry.compatibility == "UEFI 2.0+" ? "" : entry.compatibility.toLocal8Bit()) << "\",\n";
+        std::cout << "        \"description\": \"" << (entry.description == "UEFI Firmware Component: " ? "" : entry.description.toLocal8Bit()) << "\",\n";
+        std::cout << "        \"sourceLocation\": \"" << (entry.sourceLocation == "Not Available" ? "" : entry.sourceLocation.toLocal8Bit()) << "\",\n";
+        std::cout << "        \"contactInfo\": \"" << (entry.contactInfo == "Not Available" ? "" : entry.contactInfo.toLocal8Bit()) << "\",\n";
+        std::cout << "        \"externalReferences\": \"" << (entry.externalReferences == "Not Available" ? "" : entry.externalReferences.toLocal8Bit()) << "\",\n";
+        std::cout << "        \"company\": \"" << (entry.company == "N/A (Non-PE file)" ? "" : entry.company.toLocal8Bit()) << "\",\n";
+        std::cout << "        \"fileDescription\": \"" << (entry.fileDescription == "UEFI Firmware Component: " ? "" : entry.fileDescription.toLocal8Bit()) << "\",\n";
+        std::cout << "        \"fileVersion\": \"" << (entry.fileVersion == "N/A" ? "" : entry.fileVersion.toLocal8Bit()) << "\",\n";
+        std::cout << "        \"copyright\": \"" << (entry.copyright == "N/A (Non-PE file)" ? "" : entry.copyright.toLocal8Bit()) << "\",\n";
+        std::cout << "        \"digitalSigner\": \"" << (entry.signerCN == "N/A (Non-PE file)" ? "" : entry.signerCN.toLocal8Bit()) << "\",\n";
+        std::cout << "        \"peVersion\": \"" << (entry.peVersion == "N/A (Non-PE file)" ? "" : entry.peVersion.toLocal8Bit()) << "\",\n";
         std::cout << "        \"sha256Hash\": \"" << entry.sha256Hash.toLocal8Bit() << "\",\n";
-        std::cout << "        \"isPe32File\": " << (entry.isPe32File ? "true" : "false") << ",\n";
         std::cout << "        \"parentFfsGuid\": \"" << entry.parentFfsGuid.toLocal8Bit() << "\",\n";
         std::cout << "        \"parentFfsName\": \"" << entry.parentFfsName.toLocal8Bit() << "\",\n";
         std::cout << "        \"peFileName\": \"" << entry.peFileName.toLocal8Bit() << "\",\n";
@@ -1512,6 +1579,11 @@ USTATUS FfsSbomParser::exportToJsonStdout()
 
 void FfsSbomParser::logProgress(const UString& message, bool isError)
 {
+    // Skip DEBUG messages to keep output clean
+    if (message.find("[DEBUG]") != (size_t)-1) {
+        return;
+    }
+
     if (isError) {
         fprintf(stderr, "ERROR: %s\n", (const char*)message.toLocal8Bit());
     } else {
@@ -2556,7 +2628,7 @@ SbomEntry FfsSbomParser::createPe32Entry(const UModelIndex& peSection, const USt
     // Initialize all fields to empty/default values
     entry.componentName = "";
     entry.guid = "";
-    entry.version = "";
+    entry.version = "";  // Will be populated by version extraction if available
     entry.hash = "";
     entry.license = "";
     entry.dependencies.clear();
@@ -3745,4 +3817,419 @@ void FfsSbomParser::postProcessPe32ImageComponents()
     }
 
     logProgress("[DEBUG] Completed post-processing of PE32 image components");
+}
+
+// GUID database functionality (similar to guiddatabase.cpp)
+GuidDatabase FfsSbomParser::buildGuidDatabaseFromTree(const UModelIndex& index)
+{
+    GuidDatabase db;
+
+    if (!index.isValid())
+        return db;
+
+    for (int i = 0; i < model->rowCount(index); i++) {
+        GuidDatabase tmpDb = buildGuidDatabaseFromTree(index.child(i, 0));
+        db.insert(tmpDb.begin(), tmpDb.end());
+    }
+
+    if (model->type(index) == Types::File && !model->text(index).isEmpty()) {
+        EFI_GUID guid = readUnaligned((const EFI_GUID*)model->header(index).left(16).constData());
+        db[guid] = model->text(index);
+    }
+
+    return db;
+}
+
+USTATUS FfsSbomParser::exportGuidDatabaseToCsv(const UString& outputPath)
+{
+    std::ofstream outputFile(outputPath.toLocal8Bit(), std::ios::out | std::ios::trunc);
+    if (!outputFile)
+        return U_FILE_OPEN;
+
+    for (GuidDatabase::iterator it = guidDatabase.begin(); it != guidDatabase.end(); it++) {
+        std::string guid(guidToUString(it->first, false).toLocal8Bit());
+        std::string name(it->second.toLocal8Bit());
+        outputFile << guid << ',' << name << '\n';
+    }
+
+    return U_SUCCESS;
+}
+
+UString FfsSbomParser::extractGuidFromHeader(const UModelIndex& index)
+{
+    if (model->type(index) == Types::File && !model->hasEmptyHeader(index)) {
+        const UByteArray& header = model->header(index);
+        if (header.size() >= sizeof(EFI_FFS_FILE_HEADER)) {
+            const EFI_FFS_FILE_HEADER* ffsHeader = (const EFI_FFS_FILE_HEADER*)header.constData();
+            return guidToUString(ffsHeader->Name);
+        }
+    }
+    return UString();
+}
+
+USTATUS FfsSbomParser::generateEnhancedSbom(const UModelIndex& index, const UString& outputPath)
+{
+    // First, build the GUID database
+    logProgress("Building GUID database from firmware tree...");
+    guidDatabase = buildGuidDatabaseFromTree(index);
+    logProgress("Found " + usprintf("%zu", guidDatabase.size()) + " GUID entries");
+
+    // Export GUID database to CSV
+    UString guidCsvPath = outputPath + ".guids.csv";
+    USTATUS result = exportGuidDatabaseToCsv(guidCsvPath);
+    if (result == U_SUCCESS) {
+        logProgress("GUID database exported to: " + guidCsvPath);
+    } else {
+        logProgress("Failed to export GUID database", true);
+    }
+
+    // Parse SBOM with enhanced information
+    logProgress("Parsing SBOM with enhanced GUID information...");
+    result = parseSbomRecursive(index, outputPath);
+    if (result != U_SUCCESS) {
+        return result;
+    }
+
+    // Post-process components to find PE32 image sections and calculate hashes
+    postProcessPe32ImageComponents();
+
+    // Enhance each component with GUID database information
+    logProgress("Enhancing components with GUID database information...");
+    for (auto& entry : sbomEntries) {
+        populateComponentFromGuidDatabase(entry);
+    }
+
+    return U_SUCCESS;
+}
+
+void FfsSbomParser::populateComponentFromGuidDatabase(SbomEntry& entry)
+{
+    // If we have a GUID, try to find additional information from the GUID database
+    if (!entry.guid.isEmpty()) {
+        // Convert GUID string to EFI_GUID for lookup
+        EFI_GUID guid;
+        if (ustringToGuid(entry.guid, guid)) {
+            auto it = guidDatabase.find(guid);
+            if (it != guidDatabase.end()) {
+                // If component name is empty or generic, use the name from GUID database
+                if (entry.componentName.isEmpty() ||
+                    entry.componentName == "Unknown" ||
+                    entry.componentName.find("GUID_") == 0) {
+                    entry.componentName = it->second;
+                }
+
+                // Add GUID database name to description if not already present
+                if (entry.description.isEmpty()) {
+                    entry.description = "GUID Database Name: " + it->second;
+                } else if (entry.description.find("GUID Database Name:") == std::string::npos) {
+                    entry.description += " (GUID DB: " + it->second + ")";
+                }
+            }
+        }
+    }
+
+    // Enhanced version extraction from Version sections
+    if (entry.version.isEmpty()) {
+        // Try to find version information in the component's sections
+        for (const auto& section : entry.sections) {
+            if (section.subtype.find("Version") != std::string::npos) {
+                // This would require additional parsing of the Version section
+                // For now, we'll mark that version information is available
+                if (entry.description.isEmpty()) {
+                    entry.description = "Version section found";
+                } else {
+                    entry.description += " (Version section available)";
+                }
+                break;
+            }
+        }
+    }
+
+    // Enhanced license detection from PE32 sections
+    if (entry.license.isEmpty() && entry.isPe32File) {
+        // Try to extract license information from PE32 metadata
+        for (const auto& section : entry.sections) {
+            if (section.subtype.find("PE32") != std::string::npos ||
+                section.subtype.find("TE") != std::string::npos) {
+                // This would require parsing the PE32 section for license strings
+                // For now, we'll mark that PE32 information is available
+                if (entry.description.isEmpty()) {
+                    entry.description = "PE32 executable with potential license info";
+                } else {
+                    entry.description += " (PE32 executable)";
+                }
+                break;
+            }
+        }
+    }
+}
+
+// New GUID-centric SBOM generation
+USTATUS FfsSbomParser::generateGuidBasedSbom(const UModelIndex& index, const UString& outputPath)
+{
+    logProgress("Starting GUID-based SBOM generation...");
+
+    // Clear any existing entries
+    sbomEntries.clear();
+    processedGuids.clear();
+    processedComponents.clear();
+
+    // Step 1: Build GUID database using existing function
+    logProgress("Building GUID database from firmware tree...");
+    guidDatabase = buildGuidDatabaseFromTree(index);
+    logProgress("Found " + usprintf("%zu", guidDatabase.size()) + " GUID entries");
+
+    // Export GUID database to CSV
+    UString guidCsvPath = outputPath + ".guids.csv";
+    USTATUS result = exportGuidDatabaseToCsv(guidCsvPath);
+    if (result == U_SUCCESS) {
+        logProgress("GUID database exported to: " + guidCsvPath);
+    } else {
+        logProgress("Failed to export GUID database", true);
+    }
+
+    // Step 2: For each GUID in the database, create an SBOM entry
+    logProgress("Processing each GUID to create SBOM entries...");
+    for (const auto& guidEntry : guidDatabase) {
+        const EFI_GUID& guid = guidEntry.first;
+        const UString& name = guidEntry.second;
+
+        // Find the tree node for this GUID
+        UModelIndex node = findNodeByGuid(index, guid);
+        if (!node.isValid()) {
+            logProgress("Warning: Could not find tree node for GUID " + guidToUString(guid));
+            continue;
+        }
+
+        // Create SBOM entry for this GUID
+        SbomEntry entry = createSbomEntryFromGuid(guid, name, node);
+
+        // Extract version information
+        extractVersionFromNode(node, entry);
+
+        // Extract PE32/TE information
+        extractPe32InfoFromNode(node, entry);
+
+        // Add to SBOM entries
+        sbomEntries.push_back(entry);
+        processedGuids.insert(guidToUString(guid));
+    }
+
+    logProgress("Generated " + usprintf("%zu", sbomEntries.size()) + " SBOM entries");
+    return U_SUCCESS;
+}
+
+UModelIndex FfsSbomParser::findNodeByGuid(const UModelIndex& index, const EFI_GUID& targetGuid)
+{
+    if (!index.isValid()) {
+        return UModelIndex();
+    }
+
+    // Check if this node is a File type and matches the target GUID
+    if (model->type(index) == Types::File && !model->hasEmptyHeader(index)) {
+        const UByteArray& header = model->header(index);
+        if (header.size() >= sizeof(EFI_FFS_FILE_HEADER)) {
+            const EFI_FFS_FILE_HEADER* ffsHeader = (const EFI_FFS_FILE_HEADER*)header.constData();
+            EFI_GUID nodeGuid = readUnaligned((const EFI_GUID*)&ffsHeader->Name);
+            if (memcmp(&nodeGuid, &targetGuid, sizeof(EFI_GUID)) == 0) {
+                return index;
+            }
+        }
+    }
+
+    // Recursively search children
+    for (int i = 0; i < model->rowCount(index); i++) {
+        UModelIndex result = findNodeByGuid(index.child(i, 0), targetGuid);
+        if (result.isValid()) {
+            return result;
+        }
+    }
+
+    return UModelIndex();
+}
+
+SbomEntry FfsSbomParser::createSbomEntryFromGuid(const EFI_GUID& guid, const UString& name, const UModelIndex& node)
+{
+    SbomEntry entry;
+
+    // Basic information
+    entry.componentName = name;
+    entry.guid = guidToUString(guid);
+    entry.offset = model->offset(node);
+    entry.size = model->body(node).size() + model->header(node).size();
+
+    // Type and subtype from FFS header
+    entry.type = itemTypeToUString(model->type(node));
+    entry.subtype = itemSubtypeToUString(model->type(node), model->subtype(node));
+
+    // Component type classification
+    entry.componentType = extractComponentType(node);
+
+    // Basic hash calculation
+    entry.hash = calculateHash(node);
+    entry.sha256Hash = entry.hash;
+
+    // Initialize other fields
+    entry.version = "";  // Will be populated by version extraction if available
+    entry.build = "";
+    entry.license = "Unknown";
+    entry.architecture = "";
+    entry.buildDate = "";
+    entry.vendor = "";
+    entry.securityAttributes = "";
+    entry.compatibility = "";
+    entry.description = name;
+    entry.sourceLocation = "";
+    entry.contactInfo = "";
+    entry.externalReferences = "";
+    entry.company = "";
+    entry.fileDescription = name;
+    entry.fileVersion = "";
+    entry.copyright = "";
+    entry.signerCN = "";
+    entry.peVersion = "";
+    entry.parentFfsGuid = "";
+    entry.parentFfsName = "";
+    entry.peFileName = "";
+    entry.peSectionType = "";
+    entry.peSectionOffset = 0;
+    entry.peSectionSize = 0;
+    entry.isPe32File = false;
+
+    return entry;
+}
+
+void FfsSbomParser::extractVersionFromNode(const UModelIndex& index, SbomEntry& entry)
+{
+    if (!index.isValid()) {
+        return;
+    }
+
+    // Search for Version sections in children
+    for (int i = 0; i < model->rowCount(index); i++) {
+        UModelIndex child = index.child(i, 0);
+        if (!child.isValid()) continue;
+
+        if (model->type(child) == Types::Section && model->subtype(child) == EFI_SECTION_VERSION) {
+            // Found a version section
+            if (!model->hasEmptyBody(child)) {
+                const UByteArray& versionData = model->body(child);
+                if (versionData.size() >= 2) {
+                    // Parse version string from Version section
+                    UString versionString = uFromUcs2(versionData.constData());
+                    if (!versionString.isEmpty()) {
+                        entry.version = versionString;
+                        logProgress("Extracted version info for " + entry.componentName + ": " + entry.version);
+                        return;
+                    }
+                }
+            }
+        }
+
+        // Recursively search in children
+        extractVersionFromNode(child, entry);
+        if (!entry.version.isEmpty()) {
+            return; // Found version, stop searching
+        }
+    }
+}
+
+void FfsSbomParser::extractPe32InfoFromNode(const UModelIndex& index, SbomEntry& entry)
+{
+    if (!index.isValid()) {
+        return;
+    }
+
+    // Search for PE32 or TE image sections
+    for (int i = 0; i < model->rowCount(index); i++) {
+        UModelIndex child = index.child(i, 0);
+        if (!child.isValid()) continue;
+
+        if (model->type(child) == Types::Section) {
+            UINT8 sectionType = model->subtype(child);
+
+            if (sectionType == EFI_SECTION_PE32 || sectionType == EFI_SECTION_TE) {
+                // Found PE32 or TE section
+                entry.isPe32File = true;
+                entry.peSectionType = (sectionType == EFI_SECTION_PE32) ? "PE32" : "TE";
+                entry.peSectionOffset = model->offset(child);
+                entry.peSectionSize = model->body(child).size();
+
+                // Extract PE32/TE specific information
+                if (!model->hasEmptyBody(child)) {
+                    const UByteArray& peData = model->body(child);
+
+                    // Calculate hash of PE section
+                    UINT8 hash[32];
+                    sha256(peData.constData(), peData.size(), hash);
+                    UString peHashString;
+                    for (int j = 0; j < 32; j++) {
+                        peHashString += usprintf("%02X", hash[j]);
+                    }
+                    entry.hash = peHashString;
+                    entry.sha256Hash = peHashString;
+
+                    // Set PE32-specific attributes based on component name
+                    entry.license = detectLicenseFromComponentName(entry.componentName);
+                    entry.securityAttributes = "Standard";
+                    entry.compatibility = "UEFI 2.x";
+                    entry.description = "PE32 executable: " + entry.componentName;
+                    entry.peFileName = entry.componentName + (sectionType == EFI_SECTION_PE32 ? ".efi" : "_TE.efi");
+
+                    // Try to extract architecture from PE header
+                    if (peData.size() >= 64 && peData[0] == 'M' && peData[1] == 'Z') {
+                        UINT32 peOffset = readUnaligned((const UINT32*)(peData.constData() + 60));
+                        if (peOffset + 24 <= peData.size()) {
+                            if (peData[peOffset] == 'P' && peData[peOffset + 1] == 'E') {
+                                UINT16 machine = readUnaligned((const UINT16*)(peData.constData() + peOffset + 4));
+                                switch (machine) {
+                                case 0x014c: entry.architecture = "x86"; break;
+                                case 0x8664: entry.architecture = "x64"; break;
+                                case 0x01c0: entry.architecture = "ARM"; break;
+                                case 0xaa64: entry.architecture = "ARM64"; break;
+                                case 0x01f0: entry.architecture = "RISC-V"; break;
+                                default: entry.architecture = "Unknown"; break;
+                                }
+                            }
+                        }
+                    }
+
+                    logProgress("Extracted PE32 info for " + entry.componentName + ": " + entry.peSectionType + " section, " + usprintf("%d", entry.peSectionSize) + " bytes");
+                }
+                return; // Found PE section, stop searching
+            }
+        }
+
+        // Recursively search in children
+        extractPe32InfoFromNode(child, entry);
+        if (entry.isPe32File) {
+            return; // Found PE info, stop searching
+        }
+    }
+}
+
+UString FfsSbomParser::detectLicenseFromComponentName(const UString& componentName)
+{
+    // Detect license based on component name patterns
+    if (componentName.find("Intel") != (size_t)-1 ||
+        componentName.find("intel") != (size_t)-1) {
+        return "Intel Proprietary";
+    }
+
+    if (componentName.find("Ami") != (size_t)-1 ||
+        componentName.find("AMI") != (size_t)-1) {
+        return "AMI Proprietary";
+    }
+
+    if (componentName.find("Microsoft") != (size_t)-1 ||
+        componentName.find("MSFT") != (size_t)-1) {
+        return "Microsoft Proprietary";
+    }
+
+    if (componentName.find("Phoenix") != (size_t)-1) {
+        return "Phoenix Proprietary";
+    }
+
+    // Default for PE32 files
+    return "Proprietary";
 }

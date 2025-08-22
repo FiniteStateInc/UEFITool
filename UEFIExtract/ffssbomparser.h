@@ -26,6 +26,7 @@ WITHOUT WARRANTIES OR REPRESENTATIONS OF ANY KIND, EITHER EXPRESS OR IMPLIED.
 #include "../common/filesystem.h"
 #include "../common/utility.h"
 #include "../common/digest/sha2.h"
+#include "../common/guiddatabase.h"
 
 struct SectionInfo {
     UString type;
@@ -136,7 +137,6 @@ public:
     USTATUS exportToText(const UString& filepath);
     USTATUS exportToStdout();
     USTATUS exportToCsv(const UString& filepath);
-    USTATUS exportToJson(const UString& filepath);
     USTATUS exportToJsonStdout();
 
     // Main parsing methods
@@ -178,6 +178,8 @@ private:
     std::vector<SbomEntry> sbomEntries;
     std::map<UString, UString> guidToNameMap;
     std::set<UString> processedGuids;
+    std::set<UString> processedComponents;  // For deduplication by component name + offset
+    GuidDatabase guidDatabase;  // GUID database for enhanced SBOM generation
 
     // Recursive parsing
     USTATUS parseSbomRecursive(const UModelIndex& index, const UString& basePath);
@@ -272,8 +274,25 @@ private:
     // GUID to friendly name translation
     UString translateGuidToFriendlyName(const UString& guid);
 
+    // GUID database functionality (similar to guiddatabase.cpp)
+    GuidDatabase buildGuidDatabaseFromTree(const UModelIndex& index);
+    USTATUS exportGuidDatabaseToCsv(const UString& outputPath);
+    UString extractGuidFromHeader(const UModelIndex& index);
+
     // Logging
     void logProgress(const UString& message, bool isError = false);
-};
+
+public:
+    // Enhanced SBOM with GUID database integration
+    USTATUS generateEnhancedSbom(const UModelIndex& index, const UString& outputPath);
+    void populateComponentFromGuidDatabase(SbomEntry& entry);
+
+    // New GUID-centric SBOM generation
+    USTATUS generateGuidBasedSbom(const UModelIndex& index, const UString& outputPath);
+    UModelIndex findNodeByGuid(const UModelIndex& index, const EFI_GUID& targetGuid);
+    void extractVersionFromNode(const UModelIndex& index, SbomEntry& entry);
+    void extractPe32InfoFromNode(const UModelIndex& index, SbomEntry& entry);
+    SbomEntry createSbomEntryFromGuid(const EFI_GUID& guid, const UString& name, const UModelIndex& node);
+    UString detectLicenseFromComponentName(const UString& componentName);};
 
 #endif // FFSSBOMPARSER_H

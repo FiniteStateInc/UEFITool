@@ -133,7 +133,7 @@ USTATUS FfsDumper::recursiveDump(const UModelIndex & index, const UString & path
 
                 dumped = true;
             }
-            
+
             if (dumpMode == DUMP_FILE) {
                 UModelIndex fileIndex = index;
                 if (model->type(fileIndex) != Types::File) {
@@ -191,7 +191,7 @@ USTATUS FfsDumper::recursiveDump(const UModelIndex & index, const UString & path
 
             std::ofstream file(filename.toLocal8Bit());
             if (!file) {
-                printf("Cannot open info \"%s\".\n", (const char*)filename.toLocal8Bit());
+                fprintf(stderr, "Cannot open info \"%s\".\n", (const char*)filename.toLocal8Bit());
                 return U_FILE_OPEN;
             }
 

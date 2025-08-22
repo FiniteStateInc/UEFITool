@@ -444,8 +444,8 @@ void FfsFocusedExtractor::logProgress(const UString& message, bool isError)
 {
     std::lock_guard<std::mutex> lock(outputMutex);
     if (isError) {
-        printf("ERROR: %s\n", (const char*)message.toLocal8Bit());
+        fprintf(stderr, "ERROR: %s\n", (const char*)message.toLocal8Bit());
     } else {
-        printf("INFO: %s\n", (const char*)message.toLocal8Bit());
+        fprintf(stderr, "INFO: %s\n", (const char*)message.toLocal8Bit());
     }
 }
